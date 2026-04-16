@@ -179,6 +179,10 @@ class MaterialTvVideoControlsThemeData {
   /// Whether to shift the subtitles upwards when the controls are visible.
   final bool shiftSubtitlesOnControlsVisibilityChange;
 
+  /// Base seek step when pressing arrow keys on the seek bar.
+  /// Acceleration multiplies this on sustained hold. Default: 10 seconds.
+  final Duration seekBarSeekDuration;
+
   /// {@macro material_desktop_video_controls_theme_data}
   const MaterialTvVideoControlsThemeData({
     this.displaySeekBar = true,
@@ -228,6 +232,7 @@ class MaterialTvVideoControlsThemeData {
     this.volumeBarThumbColor = const Color(0xFFFFFFFF),
     this.volumeBarTransitionDuration = const Duration(milliseconds: 150),
     this.shiftSubtitlesOnControlsVisibilityChange = true,
+    this.seekBarSeekDuration = const Duration(seconds: 10),
   });
 
   /// Creates a copy of this [MaterialTvVideoControlsThemeData] with the given fields replaced by the non-null parameter values.
@@ -269,6 +274,7 @@ class MaterialTvVideoControlsThemeData {
     Color? volumeBarThumbColor,
     Duration? volumeBarTransitionDuration,
     bool? shiftSubtitlesOnControlsVisibilityChange,
+    Duration? seekBarSeekDuration,
   }) {
     return MaterialTvVideoControlsThemeData(
       displaySeekBar: displaySeekBar ?? this.displaySeekBar,
@@ -323,6 +329,8 @@ class MaterialTvVideoControlsThemeData {
       shiftSubtitlesOnControlsVisibilityChange:
           shiftSubtitlesOnControlsVisibilityChange ??
               this.shiftSubtitlesOnControlsVisibilityChange,
+      seekBarSeekDuration:
+          seekBarSeekDuration ?? this.seekBarSeekDuration,
     );
   }
 }
@@ -768,6 +776,15 @@ class MaterialTvSeekBarState extends State<MaterialTvSeekBar> {
   late Duration duration = controller(context).player.state.duration;
   late Duration buffer = controller(context).player.state.buffer;
 
+  /// Tracks consecutive repeat events for seek acceleration.
+  int _seekRepeatCount = 0;
+
+  /// Maximum acceleration multiplier (caps at 6x base seek duration).
+  static const int _maxAccelMultiplier = 6;
+
+  /// Number of repeats before each acceleration tier kicks in.
+  static const int _accelThreshold = 4;
+
   final List<StreamSubscription> subscriptions = [];
 
   @override
@@ -911,25 +928,34 @@ class MaterialTvSeekBarState extends State<MaterialTvSeekBar> {
       child: Focus(
         focusNode: focusNode2,
         onKeyEvent: (node, event) {
-          if (event is KeyDownEvent) {
-            if (event.logicalKey == LogicalKeyboardKey.arrowRight) {
-              double percent = 0.01;
-
-              double sliderPercent =
-                  (positionPercent + percent).clamp(0.0, 1.0);
-
-              setState(() {
-                hover = true;
-                slider = sliderPercent;
-              });
-              controller(context).player.seek(duration * slider);
-
+          // Reset acceleration on key release.
+          if (event is KeyUpEvent) {
+            if (event.logicalKey == LogicalKeyboardKey.arrowRight ||
+                event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+              _seekRepeatCount = 0;
               return KeyEventResult.handled;
-            } else if (event.logicalKey == LogicalKeyboardKey.arrowLeft) {
-              double percent = 0.01;
+            }
+          }
 
-              double sliderPercent =
-                  (positionPercent - percent).clamp(0.0, 1.0);
+          if (event is KeyDownEvent || event is KeyRepeatEvent) {
+            if (event.logicalKey == LogicalKeyboardKey.arrowRight ||
+                event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+              final direction =
+                  event.logicalKey == LogicalKeyboardKey.arrowRight ? 1 : -1;
+
+              // Accelerate: multiplier grows every _accelThreshold repeats.
+              final multiplier = (1 + _seekRepeatCount ~/ _accelThreshold)
+                  .clamp(1, _maxAccelMultiplier);
+              _seekRepeatCount++;
+
+              final baseSeek = _theme(context).seekBarSeekDuration;
+              final seekMs = baseSeek.inMilliseconds * multiplier;
+              final durationMs = duration.inMilliseconds;
+              if (durationMs <= 0) return KeyEventResult.handled;
+
+              final stepPercent = seekMs / durationMs;
+              final sliderPercent =
+                  (positionPercent + direction * stepPercent).clamp(0.0, 1.0);
 
               setState(() {
                 hover = true;
