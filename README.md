@@ -29,6 +29,7 @@ var tvThemeData = MaterialTvVideoControlsThemeData(
     visibleOnMount: true,
     seekBarThumbColor: seekBarColor,
     seekBarPositionColor: seekBarColor,
+    seekBarSeekDuration: Duration(seconds: 10), // base seek step per arrow press
     primaryButtonBar: [
       const MaterialTvPlayOrPauseButton(
           iconSize: 124,
@@ -49,3 +50,13 @@ return MaterialTvVideoControlsTheme(
     ),
 );
 ```
+
+### Seek bar behavior
+
+The seek bar uses **duration-based** seeking instead of percentage-based:
+
+- **Tap** arrow key: seeks by `seekBarSeekDuration` (default: 10 seconds)
+- **Hold** arrow key: accelerates progressively — 1x → 2x → 3x → 4x → 5x → 6x (every 4 repeats)
+- **Release**: resets acceleration
+
+This gives consistent seek UX regardless of content length (unlike percentage-based seeking where 1% of a 3-hour movie is 108 seconds).

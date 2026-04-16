@@ -1,6 +1,6 @@
 name: media_kit_tv
 description: "Extensions for the Flutter media_kit libary for TVs"
-version: 0.0.3
+version: 0.0.4
 homepage: https://github.com/OpenMediaStation/media_kit_tv
 
 environment:
