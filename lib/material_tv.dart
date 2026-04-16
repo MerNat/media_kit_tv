@@ -954,8 +954,12 @@ class MaterialTvSeekBarState extends State<MaterialTvSeekBar> {
               if (durationMs <= 0) return KeyEventResult.handled;
 
               final stepPercent = seekMs / durationMs;
+              // On first press use the player's actual position; on
+              // subsequent repeats use the slider target — the player
+              // hasn't caught up yet and would reset the seek.
+              final base = _seekRepeatCount <= 1 ? positionPercent : slider;
               final sliderPercent =
-                  (positionPercent + direction * stepPercent).clamp(0.0, 1.0);
+                  (base + direction * stepPercent).clamp(0.0, 1.0);
 
               setState(() {
                 hover = true;

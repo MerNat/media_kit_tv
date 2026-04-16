@@ -157,6 +157,22 @@ void main() {
       expect(pos, greaterThan(noAccelPos));
     });
 
+    test('holding right never resets to start', () {
+      // Each successive event should move further from start, never backward
+      double prev = 0.0;
+      for (int i = 0; i < 30; i++) {
+        final pos = simulateSeekSequence(
+          eventCount: i + 1,
+          direction: 1,
+          baseSeek: const Duration(seconds: 10),
+          totalDuration: const Duration(hours: 1),
+        );
+        expect(pos, greaterThanOrEqualTo(prev),
+            reason: 'position should never decrease at event $i');
+        prev = pos;
+      }
+    });
+
     test('left seek from middle moves backward', () {
       final pos = simulateSeekSequence(
         eventCount: 5,
