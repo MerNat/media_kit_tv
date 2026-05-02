@@ -528,10 +528,24 @@ class _MaterialTvVideoControlsState extends State<_MaterialTvVideoControls> {
         onEnter();
 
         if (event is KeyDownEvent) {
-          print('Key pressed: ${event.logicalKey.debugName}');
-
-          if (event.logicalKey == LogicalKeyboardKey.mediaPlayPause) {
+          // Toggle play/pause on TV remote OK and dedicated media keys.
+          //
+          // Fire TV and Android TV remotes send `LogicalKeyboardKey.select`
+          // when the user presses OK, which Flutter's default
+          // `ActivateIntent` does NOT map (it maps enter/space/gameButtonA).
+          // Without this explicit handler, OK silently does nothing — both
+          // globally AND when focus is on a control button — which is the
+          // single biggest D-pad UX bug in this package.
+          //
+          // We deliberately do not intercept `enter` / `space` here so the
+          // default IconButton `ActivateIntent` still fires Skip Prev/Next,
+          // Fullscreen, and Volume buttons when those have focus.
+          if (event.logicalKey == LogicalKeyboardKey.select ||
+              event.logicalKey == LogicalKeyboardKey.mediaPlayPause ||
+              event.logicalKey == LogicalKeyboardKey.mediaPlay ||
+              event.logicalKey == LogicalKeyboardKey.mediaPause) {
             controller(context).player.playOrPause();
+            return KeyEventResult.handled;
           }
         }
 
@@ -539,8 +553,12 @@ class _MaterialTvVideoControlsState extends State<_MaterialTvVideoControls> {
       },
       child: Theme(
         data: Theme.of(context).copyWith(
-          focusColor: const Color(0x00000000),
-          hoverColor: const Color(0x00000000),
+          // Keep splash and highlight transparent — TV navigation should
+          // never show a tap ripple. But leave focusColor and hoverColor
+          // alone so the inherited theme's focus indicator remains visible
+          // on every IconButton (Skip Prev/Next, Play/Pause, Fullscreen,
+          // Volume, plus any custom topButtonBar buttons consumers add).
+          // Without that indicator, D-pad navigation is invisible.
           splashColor: const Color(0x00000000),
           highlightColor: const Color(0x00000000),
         ),
