@@ -544,15 +544,20 @@ class _MaterialTvVideoControlsState extends State<_MaterialTvVideoControls> {
     return FocusScope(
       autofocus: true,
       onKeyEvent: (node, event) {
-        // Back button on TV: first press hides controls if visible, second
-        // press (controls already hidden) bubbles up so the parent route
-        // can pop. Matches YouTube / Netflix / Plex on TV — the universal
-        // expectation. Handled BEFORE onEnter() so a hide-on-back press
-        // doesn't first show the controls and then immediately hide them.
-        if (event is KeyDownEvent &&
-            (event.logicalKey == LogicalKeyboardKey.goBack ||
-                event.logicalKey == LogicalKeyboardKey.escape)) {
-          if (visible) {
+        // Back / Escape on TV: first press hides controls if visible,
+        // second press (controls already hidden) bubbles up so the parent
+        // route can pop. Matches YouTube / Netflix / Plex on TV.
+        //
+        // Filtered for ALL phases of the key (Down + Up + Repeat) so we
+        // skip the `onEnter()` call below regardless. Without that, the
+        // KeyDown hides the controls but the KeyUp falls through and
+        // re-shows them — looks like a one-frame glitch and the user can
+        // never actually dismiss the chrome.
+        final isBackKey =
+            event.logicalKey == LogicalKeyboardKey.goBack ||
+                event.logicalKey == LogicalKeyboardKey.escape;
+        if (isBackKey) {
+          if (event is KeyDownEvent && visible) {
             _setVisible(false);
             unshiftSubtitle();
             _timer?.cancel();
