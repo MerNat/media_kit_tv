@@ -76,6 +76,17 @@ class MaterialTvVideoControlsThemeData {
   /// Whether the controls are initially visible.
   final bool visibleOnMount;
 
+  /// Called whenever the controls' visibility changes (auto-hide timer
+  /// fires, user activity re-shows them, back-key handler hides them).
+  /// Fires with the new value. Lets consumers gate their own back-button
+  /// / `PopScope` logic on whether the controls were visible at the
+  /// moment of the press — on Android the platform `popRoute` channel
+  /// fires in parallel with the `KeyEvent` channel, so a `Focus` widget
+  /// returning `KeyEventResult.handled` is not enough to stop the route
+  /// from popping. The consumer needs the visibility signal to gate
+  /// `PopScope.onPopInvokedWithResult` itself.
+  final ValueChanged<bool>? onControlsVisibilityChanged;
+
   // GENERIC
 
   /// Padding around the controls.
@@ -193,6 +204,7 @@ class MaterialTvVideoControlsThemeData {
     this.modifyVolumeOnScroll = true,
     this.keyboardShortcuts,
     this.visibleOnMount = false,
+    this.onControlsVisibilityChanged,
     this.hideMouseOnControlsRemoval = false,
     this.padding,
     this.controlsHoverDuration = const Duration(seconds: 3),
@@ -245,6 +257,7 @@ class MaterialTvVideoControlsThemeData {
     bool? modifyVolumeOnScroll,
     Map<ShortcutActivator, VoidCallback>? keyboardShortcuts,
     bool? visibleOnMount,
+    ValueChanged<bool>? onControlsVisibilityChanged,
     bool? hideMouseOnControlsRemoval,
     Duration? controlsHoverDuration,
     Duration? controlsTransitionDuration,
@@ -289,6 +302,8 @@ class MaterialTvVideoControlsThemeData {
       modifyVolumeOnScroll: modifyVolumeOnScroll ?? this.modifyVolumeOnScroll,
       keyboardShortcuts: keyboardShortcuts ?? this.keyboardShortcuts,
       visibleOnMount: visibleOnMount ?? this.visibleOnMount,
+      onControlsVisibilityChanged:
+          onControlsVisibilityChanged ?? this.onControlsVisibilityChanged,
       hideMouseOnControlsRemoval:
           hideMouseOnControlsRemoval ?? this.hideMouseOnControlsRemoval,
       controlsHoverDuration:
@@ -437,9 +452,7 @@ class _MaterialTvVideoControlsState extends State<_MaterialTvVideoControls> {
           _theme(context).controlsHoverDuration,
           () {
             if (mounted) {
-              setState(() {
-                visible = false;
-              });
+              _setVisible(false);
               unshiftSubtitle();
             }
           },
@@ -454,6 +467,24 @@ class _MaterialTvVideoControlsState extends State<_MaterialTvVideoControls> {
       subscription.cancel();
     }
     super.dispose();
+  }
+
+  /// Single mutator for [visible] (and optionally [mount]) so we can fire
+  /// `onControlsVisibilityChanged` from one place. Schedules the callback
+  /// after the frame so consumers can update their own state without
+  /// colliding with our `setState` here.
+  void _setVisible(bool value, {bool? mountValue}) {
+    final wasVisible = visible;
+    setState(() {
+      if (mountValue != null) mount = mountValue;
+      visible = value;
+    });
+    if (wasVisible == value) return;
+    final callback = _theme(context).onControlsVisibilityChanged;
+    if (callback == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) callback(value);
+    });
   }
 
   void shiftSubtitle() {
@@ -479,43 +510,31 @@ class _MaterialTvVideoControlsState extends State<_MaterialTvVideoControls> {
   }
 
   void onHover() {
-    setState(() {
-      mount = true;
-      visible = true;
-    });
+    _setVisible(true, mountValue: true);
     shiftSubtitle();
     _timer?.cancel();
     _timer = Timer(_theme(context).controlsHoverDuration, () {
       if (mounted) {
-        setState(() {
-          visible = false;
-        });
+        _setVisible(false);
         unshiftSubtitle();
       }
     });
   }
 
   void onEnter() {
-    setState(() {
-      mount = true;
-      visible = true;
-    });
+    _setVisible(true, mountValue: true);
     shiftSubtitle();
     _timer?.cancel();
     _timer = Timer(_theme(context).controlsHoverDuration, () {
       if (mounted) {
-        setState(() {
-          visible = false;
-        });
+        _setVisible(false);
         unshiftSubtitle();
       }
     });
   }
 
   void onExit() {
-    setState(() {
-      visible = false;
-    });
+    _setVisible(false);
     unshiftSubtitle();
     _timer?.cancel();
   }
@@ -534,7 +553,7 @@ class _MaterialTvVideoControlsState extends State<_MaterialTvVideoControls> {
             (event.logicalKey == LogicalKeyboardKey.goBack ||
                 event.logicalKey == LogicalKeyboardKey.escape)) {
           if (visible) {
-            setState(() => visible = false);
+            _setVisible(false);
             unshiftSubtitle();
             _timer?.cancel();
             return KeyEventResult.handled;
@@ -695,9 +714,7 @@ class _MaterialTvVideoControlsState extends State<_MaterialTvVideoControls> {
                                       _theme(context).controlsHoverDuration,
                                       () {
                                         if (mounted) {
-                                          setState(() {
-                                            visible = false;
-                                          });
+                                          _setVisible(false);
                                           unshiftSubtitle();
                                         }
                                       },
