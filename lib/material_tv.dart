@@ -525,6 +525,23 @@ class _MaterialTvVideoControlsState extends State<_MaterialTvVideoControls> {
     return FocusScope(
       autofocus: true,
       onKeyEvent: (node, event) {
+        // Back button on TV: first press hides controls if visible, second
+        // press (controls already hidden) bubbles up so the parent route
+        // can pop. Matches YouTube / Netflix / Plex on TV — the universal
+        // expectation. Handled BEFORE onEnter() so a hide-on-back press
+        // doesn't first show the controls and then immediately hide them.
+        if (event is KeyDownEvent &&
+            (event.logicalKey == LogicalKeyboardKey.goBack ||
+                event.logicalKey == LogicalKeyboardKey.escape)) {
+          if (visible) {
+            setState(() => visible = false);
+            unshiftSubtitle();
+            _timer?.cancel();
+            return KeyEventResult.handled;
+          }
+          return KeyEventResult.ignored;
+        }
+
         onEnter();
 
         if (event is KeyDownEvent) {
