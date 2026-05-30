@@ -76,6 +76,17 @@ class MaterialTvVideoControlsThemeData {
   /// Whether the controls are initially visible.
   final bool visibleOnMount;
 
+  /// Called whenever the controls' visibility changes (auto-hide timer
+  /// fires, user activity re-shows them, back-key handler hides them).
+  /// Fires with the new value. Lets consumers gate their own back-button
+  /// / `PopScope` logic on whether the controls were visible at the
+  /// moment of the press — on Android the platform `popRoute` channel
+  /// fires in parallel with the `KeyEvent` channel, so a `Focus` widget
+  /// returning `KeyEventResult.handled` is not enough to stop the route
+  /// from popping. The consumer needs the visibility signal to gate
+  /// `PopScope.onPopInvokedWithResult` itself.
+  final ValueChanged<bool>? onControlsVisibilityChanged;
+
   // GENERIC
 
   /// Padding around the controls.
@@ -193,6 +204,7 @@ class MaterialTvVideoControlsThemeData {
     this.modifyVolumeOnScroll = true,
     this.keyboardShortcuts,
     this.visibleOnMount = false,
+    this.onControlsVisibilityChanged,
     this.hideMouseOnControlsRemoval = false,
     this.padding,
     this.controlsHoverDuration = const Duration(seconds: 3),
@@ -245,6 +257,7 @@ class MaterialTvVideoControlsThemeData {
     bool? modifyVolumeOnScroll,
     Map<ShortcutActivator, VoidCallback>? keyboardShortcuts,
     bool? visibleOnMount,
+    ValueChanged<bool>? onControlsVisibilityChanged,
     bool? hideMouseOnControlsRemoval,
     Duration? controlsHoverDuration,
     Duration? controlsTransitionDuration,
@@ -289,6 +302,8 @@ class MaterialTvVideoControlsThemeData {
       modifyVolumeOnScroll: modifyVolumeOnScroll ?? this.modifyVolumeOnScroll,
       keyboardShortcuts: keyboardShortcuts ?? this.keyboardShortcuts,
       visibleOnMount: visibleOnMount ?? this.visibleOnMount,
+      onControlsVisibilityChanged:
+          onControlsVisibilityChanged ?? this.onControlsVisibilityChanged,
       hideMouseOnControlsRemoval:
           hideMouseOnControlsRemoval ?? this.hideMouseOnControlsRemoval,
       controlsHoverDuration:
@@ -437,9 +452,7 @@ class _MaterialTvVideoControlsState extends State<_MaterialTvVideoControls> {
           _theme(context).controlsHoverDuration,
           () {
             if (mounted) {
-              setState(() {
-                visible = false;
-              });
+              _setVisible(false);
               unshiftSubtitle();
             }
           },
@@ -454,6 +467,24 @@ class _MaterialTvVideoControlsState extends State<_MaterialTvVideoControls> {
       subscription.cancel();
     }
     super.dispose();
+  }
+
+  /// Single mutator for [visible] (and optionally [mount]) so we can fire
+  /// `onControlsVisibilityChanged` from one place. Schedules the callback
+  /// after the frame so consumers can update their own state without
+  /// colliding with our `setState` here.
+  void _setVisible(bool value, {bool? mountValue}) {
+    final wasVisible = visible;
+    setState(() {
+      if (mountValue != null) mount = mountValue;
+      visible = value;
+    });
+    if (wasVisible == value) return;
+    final callback = _theme(context).onControlsVisibilityChanged;
+    if (callback == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) callback(value);
+    });
   }
 
   void shiftSubtitle() {
@@ -479,43 +510,31 @@ class _MaterialTvVideoControlsState extends State<_MaterialTvVideoControls> {
   }
 
   void onHover() {
-    setState(() {
-      mount = true;
-      visible = true;
-    });
+    _setVisible(true, mountValue: true);
     shiftSubtitle();
     _timer?.cancel();
     _timer = Timer(_theme(context).controlsHoverDuration, () {
       if (mounted) {
-        setState(() {
-          visible = false;
-        });
+        _setVisible(false);
         unshiftSubtitle();
       }
     });
   }
 
   void onEnter() {
-    setState(() {
-      mount = true;
-      visible = true;
-    });
+    _setVisible(true, mountValue: true);
     shiftSubtitle();
     _timer?.cancel();
     _timer = Timer(_theme(context).controlsHoverDuration, () {
       if (mounted) {
-        setState(() {
-          visible = false;
-        });
+        _setVisible(false);
         unshiftSubtitle();
       }
     });
   }
 
   void onExit() {
-    setState(() {
-      visible = false;
-    });
+    _setVisible(false);
     unshiftSubtitle();
     _timer?.cancel();
   }
@@ -525,13 +544,70 @@ class _MaterialTvVideoControlsState extends State<_MaterialTvVideoControls> {
     return FocusScope(
       autofocus: true,
       onKeyEvent: (node, event) {
+        // Back / Escape on TV: first press hides controls if visible,
+        // second press (controls already hidden) bubbles up so the parent
+        // route can pop. Matches YouTube / Netflix / Plex on TV.
+        //
+        // Filtered for ALL phases of the key (Down + Up + Repeat) so we
+        // skip the `onEnter()` call below regardless. Without that, the
+        // KeyDown hides the controls but the KeyUp falls through and
+        // re-shows them — looks like a one-frame glitch and the user can
+        // never actually dismiss the chrome.
+        final isBackKey =
+            event.logicalKey == LogicalKeyboardKey.goBack ||
+                event.logicalKey == LogicalKeyboardKey.escape;
+        if (isBackKey) {
+          if (event is KeyDownEvent && visible) {
+            _setVisible(false);
+            unshiftSubtitle();
+            _timer?.cancel();
+            return KeyEventResult.handled;
+          }
+          return KeyEventResult.ignored;
+        }
+
         onEnter();
 
         if (event is KeyDownEvent) {
-          print('Key pressed: ${event.logicalKey.debugName}');
-
-          if (event.logicalKey == LogicalKeyboardKey.mediaPlayPause) {
+          // Toggle play/pause on TV remote OK and dedicated media keys.
+          //
+          // Fire TV and Android TV remotes send `LogicalKeyboardKey.select`
+          // when the user presses OK, which Flutter's default
+          // `ActivateIntent` does NOT map (it maps enter/space/gameButtonA).
+          // Without this explicit handler, OK silently does nothing on the
+          // bare control surface — historically the single biggest D-pad
+          // UX bug in this package.
+          //
+          // BUT: routing every `select` straight to play/pause hijacks OK
+          // away from any focused IconButton / TextButton / custom button
+          // that a consumer drops into `topButtonBar` / `bottomButtonBar`
+          // (e.g. subtitle picker, back arrow). Those buttons bind their
+          // `onPressed` via `ActivateIntent`, which Flutter dispatches on
+          // enter/space — not on Fire TV's `select`. The old handler ate
+          // the event before the button could see it.
+          //
+          // Fix: when `select` (or a media key) fires, first try to invoke
+          // `ActivateIntent` on whatever widget currently has focus. If a
+          // button is focused, its `onPressed` runs (subtitle picker opens,
+          // back arrow pops, etc.). Only when no activatable widget is
+          // focused (bare control surface, seek bar) does the event fall
+          // through to the original play/pause behaviour.
+          //
+          // We still leave `enter` / `space` alone so the default IconButton
+          // `ActivateIntent` continues to fire Skip Prev/Next, Fullscreen,
+          // and Volume buttons on USB-keyboard / dev-host setups.
+          if (event.logicalKey == LogicalKeyboardKey.select ||
+              event.logicalKey == LogicalKeyboardKey.mediaPlayPause ||
+              event.logicalKey == LogicalKeyboardKey.mediaPlay ||
+              event.logicalKey == LogicalKeyboardKey.mediaPause) {
+            final focusedContext = FocusManager.instance.primaryFocus?.context;
+            if (focusedContext != null &&
+                Actions.maybeFind<ActivateIntent>(focusedContext) != null) {
+              Actions.invoke(focusedContext, const ActivateIntent());
+              return KeyEventResult.handled;
+            }
             controller(context).player.playOrPause();
+            return KeyEventResult.handled;
           }
         }
 
@@ -539,10 +615,52 @@ class _MaterialTvVideoControlsState extends State<_MaterialTvVideoControls> {
       },
       child: Theme(
         data: Theme.of(context).copyWith(
-          focusColor: const Color(0x00000000),
-          hoverColor: const Color(0x00000000),
+          // Keep splash and highlight transparent — TV navigation should
+          // never show a tap ripple.
           splashColor: const Color(0x00000000),
           highlightColor: const Color(0x00000000),
+          // Kept for any consumer-added Material 2 widgets that still
+          // read `Theme.focusColor` directly (InkResponse, legacy
+          // IconButton on older Flutter, etc.).
+          focusColor: const Color(0xCCF5A623),
+          // Material 3 `IconButton` does NOT read `Theme.focusColor`.
+          // It resolves its appearance via `ButtonStyle` from
+          // `IconButtonTheme.style`. Override that explicitly so every
+          // IconButton in the chrome (Play/Pause, Skip Prev/Next,
+          // Fullscreen, Volume, plus any custom topButtonBar /
+          // bottomButtonBar buttons consumers add) draws an UNMISTAKABLE
+          // focus state at TV viewing distance:
+          //   • Solid amber/gold pill behind the focused icon (100% α)
+          //   • Icon glyph swaps to near-black so it pops against the
+          //     gold background instead of vanishing into it.
+          //
+          // Subtle alpha-tinted halos (12 %, 35 %, 80 %) all proved
+          // unreadable on a 1080p TV from 8-10 ft — the white icon
+          // washed any white-ish or low-alpha halo away. A full-opacity
+          // tinted pill with inverted foreground gives the same
+          // "selected tab" affordance YouTube TV / Plex / Netflix use.
+          iconButtonTheme: IconButtonThemeData(
+            style: ButtonStyle(
+              backgroundColor: WidgetStateProperty.resolveWith((states) {
+                if (states.contains(WidgetState.focused)) {
+                  return const Color(0xFFF5A623);
+                }
+                return null;
+              }),
+              foregroundColor: WidgetStateProperty.resolveWith((states) {
+                if (states.contains(WidgetState.focused)) {
+                  return const Color(0xFF1A1A1A);
+                }
+                return null;
+              }),
+              // overlayColor transparent on focused so the solid
+              // background isn't muddied by an additional translucent
+              // layer drawn on top.
+              overlayColor: const WidgetStatePropertyAll(
+                Color(0x00000000),
+              ),
+            ),
+          ),
         ),
         child: Material(
           elevation: 0.0,
@@ -660,9 +778,7 @@ class _MaterialTvVideoControlsState extends State<_MaterialTvVideoControls> {
                                       _theme(context).controlsHoverDuration,
                                       () {
                                         if (mounted) {
-                                          setState(() {
-                                            visible = false;
-                                          });
+                                          _setVisible(false);
                                           unshiftSubtitle();
                                         }
                                       },
@@ -1058,10 +1174,21 @@ class MaterialTvPlayOrPauseButton extends StatefulWidget {
   /// Overriden icon color for [MaterialTvSkipPreviousButton].
   final Color? iconColor;
 
+  /// Whether to claim D-pad focus when the controls chrome appears.
+  ///
+  /// The controls tree is mounted/unmounted with visibility (see
+  /// `_setVisible(true, mountValue: true)` in `_MaterialTvVideoControlsState`),
+  /// so this autofocus re-fires every time the user shows the controls —
+  /// matching the YouTube / Netflix / Plex TV pattern where Play/Pause
+  /// claims default focus on every controls reappearance instead of
+  /// focus starting at the back arrow in the top bar.
+  final bool autofocus;
+
   const MaterialTvPlayOrPauseButton({
     super.key,
     this.iconSize,
     this.iconColor,
+    this.autofocus = false,
   });
 
   @override
@@ -1109,6 +1236,7 @@ class MaterialTvPlayOrPauseButtonState
   @override
   Widget build(BuildContext context) {
     return IconButton(
+      autofocus: widget.autofocus,
       onPressed: controller(context).player.playOrPause,
       iconSize: widget.iconSize ?? _theme(context).buttonBarButtonSize,
       color: widget.iconColor ?? _theme(context).buttonBarButtonColor,
