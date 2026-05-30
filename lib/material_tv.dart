@@ -574,17 +574,38 @@ class _MaterialTvVideoControlsState extends State<_MaterialTvVideoControls> {
           // Fire TV and Android TV remotes send `LogicalKeyboardKey.select`
           // when the user presses OK, which Flutter's default
           // `ActivateIntent` does NOT map (it maps enter/space/gameButtonA).
-          // Without this explicit handler, OK silently does nothing — both
-          // globally AND when focus is on a control button — which is the
-          // single biggest D-pad UX bug in this package.
+          // Without this explicit handler, OK silently does nothing on the
+          // bare control surface — historically the single biggest D-pad
+          // UX bug in this package.
           //
-          // We deliberately do not intercept `enter` / `space` here so the
-          // default IconButton `ActivateIntent` still fires Skip Prev/Next,
-          // Fullscreen, and Volume buttons when those have focus.
+          // BUT: routing every `select` straight to play/pause hijacks OK
+          // away from any focused IconButton / TextButton / custom button
+          // that a consumer drops into `topButtonBar` / `bottomButtonBar`
+          // (e.g. subtitle picker, back arrow). Those buttons bind their
+          // `onPressed` via `ActivateIntent`, which Flutter dispatches on
+          // enter/space — not on Fire TV's `select`. The old handler ate
+          // the event before the button could see it.
+          //
+          // Fix: when `select` (or a media key) fires, first try to invoke
+          // `ActivateIntent` on whatever widget currently has focus. If a
+          // button is focused, its `onPressed` runs (subtitle picker opens,
+          // back arrow pops, etc.). Only when no activatable widget is
+          // focused (bare control surface, seek bar) does the event fall
+          // through to the original play/pause behaviour.
+          //
+          // We still leave `enter` / `space` alone so the default IconButton
+          // `ActivateIntent` continues to fire Skip Prev/Next, Fullscreen,
+          // and Volume buttons on USB-keyboard / dev-host setups.
           if (event.logicalKey == LogicalKeyboardKey.select ||
               event.logicalKey == LogicalKeyboardKey.mediaPlayPause ||
               event.logicalKey == LogicalKeyboardKey.mediaPlay ||
               event.logicalKey == LogicalKeyboardKey.mediaPause) {
+            final focusedContext = FocusManager.instance.primaryFocus?.context;
+            if (focusedContext != null &&
+                Actions.maybeFind<ActivateIntent>(focusedContext) != null) {
+              Actions.invoke(focusedContext, const ActivateIntent());
+              return KeyEventResult.handled;
+            }
             controller(context).player.playOrPause();
             return KeyEventResult.handled;
           }
@@ -595,13 +616,51 @@ class _MaterialTvVideoControlsState extends State<_MaterialTvVideoControls> {
       child: Theme(
         data: Theme.of(context).copyWith(
           // Keep splash and highlight transparent — TV navigation should
-          // never show a tap ripple. But leave focusColor and hoverColor
-          // alone so the inherited theme's focus indicator remains visible
-          // on every IconButton (Skip Prev/Next, Play/Pause, Fullscreen,
-          // Volume, plus any custom topButtonBar buttons consumers add).
-          // Without that indicator, D-pad navigation is invisible.
+          // never show a tap ripple.
           splashColor: const Color(0x00000000),
           highlightColor: const Color(0x00000000),
+          // Kept for any consumer-added Material 2 widgets that still
+          // read `Theme.focusColor` directly (InkResponse, legacy
+          // IconButton on older Flutter, etc.).
+          focusColor: const Color(0xCCF5A623),
+          // Material 3 `IconButton` does NOT read `Theme.focusColor`.
+          // It resolves its appearance via `ButtonStyle` from
+          // `IconButtonTheme.style`. Override that explicitly so every
+          // IconButton in the chrome (Play/Pause, Skip Prev/Next,
+          // Fullscreen, Volume, plus any custom topButtonBar /
+          // bottomButtonBar buttons consumers add) draws an UNMISTAKABLE
+          // focus state at TV viewing distance:
+          //   • Solid amber/gold pill behind the focused icon (100% α)
+          //   • Icon glyph swaps to near-black so it pops against the
+          //     gold background instead of vanishing into it.
+          //
+          // Subtle alpha-tinted halos (12 %, 35 %, 80 %) all proved
+          // unreadable on a 1080p TV from 8-10 ft — the white icon
+          // washed any white-ish or low-alpha halo away. A full-opacity
+          // tinted pill with inverted foreground gives the same
+          // "selected tab" affordance YouTube TV / Plex / Netflix use.
+          iconButtonTheme: IconButtonThemeData(
+            style: ButtonStyle(
+              backgroundColor: WidgetStateProperty.resolveWith((states) {
+                if (states.contains(WidgetState.focused)) {
+                  return const Color(0xFFF5A623);
+                }
+                return null;
+              }),
+              foregroundColor: WidgetStateProperty.resolveWith((states) {
+                if (states.contains(WidgetState.focused)) {
+                  return const Color(0xFF1A1A1A);
+                }
+                return null;
+              }),
+              // overlayColor transparent on focused so the solid
+              // background isn't muddied by an additional translucent
+              // layer drawn on top.
+              overlayColor: const WidgetStatePropertyAll(
+                Color(0x00000000),
+              ),
+            ),
+          ),
         ),
         child: Material(
           elevation: 0.0,
@@ -1115,10 +1174,21 @@ class MaterialTvPlayOrPauseButton extends StatefulWidget {
   /// Overriden icon color for [MaterialTvSkipPreviousButton].
   final Color? iconColor;
 
+  /// Whether to claim D-pad focus when the controls chrome appears.
+  ///
+  /// The controls tree is mounted/unmounted with visibility (see
+  /// `_setVisible(true, mountValue: true)` in `_MaterialTvVideoControlsState`),
+  /// so this autofocus re-fires every time the user shows the controls —
+  /// matching the YouTube / Netflix / Plex TV pattern where Play/Pause
+  /// claims default focus on every controls reappearance instead of
+  /// focus starting at the back arrow in the top bar.
+  final bool autofocus;
+
   const MaterialTvPlayOrPauseButton({
     super.key,
     this.iconSize,
     this.iconColor,
+    this.autofocus = false,
   });
 
   @override
@@ -1166,6 +1236,7 @@ class MaterialTvPlayOrPauseButtonState
   @override
   Widget build(BuildContext context) {
     return IconButton(
+      autofocus: widget.autofocus,
       onPressed: controller(context).player.playOrPause,
       iconSize: widget.iconSize ?? _theme(context).buttonBarButtonSize,
       color: widget.iconColor ?? _theme(context).buttonBarButtonColor,
